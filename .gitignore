@@ -28,6 +28,10 @@ env/
 .vscode/
 .idea/
 
+# Claude
+.claude/
+CLAUDE.md
+
 # Models (large binaries)
 models/*.joblib
 models/*.pkl

@@ -40,16 +40,16 @@ The 15-minute persistence requirement filters transient tick noise.
 | Source | Signal | Frequency |
 |--------|--------|-----------|
 | CoinAPI VWAP | Stablecoin price (primary target) | 5m |
-| Binance | BTC/ETH market context | 5m |
-| Etherscan V2 | Ethereum mint/burn events | 5m (event-level) |
+| Binance | BTC/ETH market context + USDT cross-pairs | 5m |
+| Etherscan V2 | Ethereum mint/burn events + USDT treasury flows | 5m (event-level) |
 | TronGrid | USDT TRON treasury flows | 5m (event-level) |
 | Dune Analytics | Solana USDC mint/burn flows | 5m (event-level) |
 | XRPL public RPC | RLUSD mint/burn + DEX flows | 5m (event-level) |
 | Curve Finance | 3pool, USDe/USDC, RLUSD/USDC swap flows | 5m (event-level) |
 | FRED | DXY, VIX, T10Y, Fed Funds rate | Daily → 5m ffill |
-| AltIndex | CNN Fear & Greed Index | Daily → 5m ffill |
+| CoinGecko / AltIndex | BTC/ETH daily + CNN Fear & Greed Index | Daily → 5m ffill |
 
-See `data/README.md` for full column reference and pipeline documentation.
+See `data/README.md` for full column reference and upstream pipeline documentation.
 
 ---
 
@@ -57,48 +57,110 @@ See `data/README.md` for full column reference and pipeline documentation.
 
 ```
 ├── config/
-│   └── settings.py          # Coin configs, date ranges, API settings
+│   └── settings.py                # Coin configs, date ranges, API settings
 ├── data/
-│   ├── README.md            # Full column reference + pipeline docs
-│   ├── processed/
-│   │   ├── merged/          # merge_sources.py output ({coin}_5m_raw.parquet)
-│   │   └── cleansed/        # clean + labeled, modeling-ready ({coin}_5m.parquet)
-│   └── raw/                 # Raw source files organized by provider
-│       ├── binance/
-│       ├── coinapi/
-│       ├── curve/
-│       ├── fred/
-│       ├── market/
-│       └── onchain/
+│   ├── README.md                  # Full column reference + upstream pipeline docs
+│   ├── raw/                       # Raw source files organized by provider
+│   │   ├── binance/
+│   │   ├── coinapi/
+│   │   ├── curve/
+│   │   ├── fred/
+│   │   ├── market/
+│   │   └── onchain/
+│   └── processed/
+│       ├── merged/                # merge_sources.py output ({coin}_5m_raw.parquet)
+│       ├── cleansed/              # clean + labeled, modeling-ready ({coin}_5m.parquet)
+│       ├── features/              # pooled_5m.parquet — cross-coin feature matrix
+│       ├── models/                # catboost_{30min,1h}.cbm, calibrators, isolation_forest, thresholds
+│       ├── predictions/           # predictions_test.parquet — LOEO test predictions
+│       └── plots/                 # eda/, features/, modelling/ — analysis plots
+├── notebooks/
+│   ├── 03_eda_all_coins.ipynb          # Consolidated EDA across all 7 coins
+│   ├── 04_feature_engineering.ipynb    # Feature construction + selection → pooled_5m.parquet
+│   └── 05_modeling.ipynb               # Dual-horizon CatBoost (30min + 1h) + calibration + LOEO
 ├── src/
-│   └── data/
-│       ├── collect_all.py          # Runs all collectors
-│       ├── collect_binance.py      # Binance 5m OHLCV
-│       ├── collect_coinapi.py      # CoinAPI VWAP fiat pairs
-│       ├── collect_onchain.py      # Ethereum mint/burn + USDT treasury
-│       ├── collect_tron.py         # USDT TRON treasury flows
-│       ├── collect_curve.py        # Curve pool swap events
-│       ├── collect_xrpl.py         # RLUSD XRPL mint/burn + DEX
-│       ├── collect_dune.py         # Solana USDC mint/burn via Dune API
-│       ├── collect_fred.py         # FRED macro data
-│       ├── collect_market.py       # BTC/ETH daily + Fear & Greed
-│       ├── merge_sources.py        # Join all sources → {coin}_5m_raw.parquet
-│       ├── clean_data.py           # Fill/patch → {coin}_5m.parquet
-│       └── label_data.py           # Add depeg labels → {coin}_5m.parquet
-└── scripts/                 # Utility and exploration scripts
+│   ├── data/                      # Upstream data pipeline (collection, merging, cleaning, labelling)
+│   │   ├── collect_all.py
+│   │   ├── collect_binance.py
+│   │   ├── collect_coinapi.py
+│   │   ├── collect_onchain.py
+│   │   ├── collect_tron.py
+│   │   ├── collect_solana.py
+│   │   ├── collect_curve.py
+│   │   ├── collect_xrpl.py
+│   │   ├── collect_dune.py
+│   │   ├── collect_orderbook.py
+│   │   ├── collect_fred.py
+│   │   ├── collect_market.py
+│   │   ├── merge_sources.py
+│   │   ├── clean_data.py
+│   │   └── label_data.py
+│   └── features/
+│       └── label_depeg.py         # Alternative labeling (literature-based; not used by main pipeline)
+├── scripts/                       # Utility and exploration scripts
+├── .gitattributes                 # Git LFS tracks all *.parquet
+└── requirements.txt
+```
+
+---
+
+## Pipeline Overview
+
+```
+  data/raw/            collect_*.py      → raw API pulls per source
+        ↓
+  data/processed/      merge_sources.py  → {coin}_5m_raw.parquet (wide join, no cleaning)
+  merged/              clean_data.py     → {coin}_5m.parquet (zero-fill, ffill, anomaly patch)
+                       label_data.py     → adds depeg labels in-place
+        ↓
+  data/processed/      — modeling-ready per-coin parquets
+  cleansed/
+        ↓
+  notebooks/03        — consolidated EDA across 7 coins + crisis case studies
+        ↓
+  notebooks/04        — feature engineering + selection
+        ↓
+  data/processed/features/  pooled_5m.parquet  — pooled cross-coin feature matrix
+        ↓
+  notebooks/05        — dual-horizon CatBoost (30min + 1h), calibration, isolation forest,
+                        threshold optimization, LOEO evaluation, SHAP analysis
+        ↓
+  data/processed/models/, data/processed/predictions/, data/processed/plots/
 ```
 
 ---
 
 ## Setup
 
-### 1. Install dependencies
+### 1. Install system dependencies
+
+You need **Git LFS** to fetch the parquet files (this repo tracks all `*.parquet` via LFS):
+
+```bash
+# macOS (Homebrew)
+brew install git-lfs
+
+# Amazon Linux / RHEL (download release binary)
+# see: https://github.com/git-lfs/git-lfs/releases
+
+git lfs install
+```
+
+### 2. Clone and fetch LFS files
+
+```bash
+git clone https://github.com/mrowelle/stablecoin-depeg-prediction.git
+cd stablecoin-depeg-prediction
+git lfs pull
+```
+
+### 3. Install Python dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 2. Configure API keys
+### 4. Configure API keys (only needed to re-run data collection)
 
 Copy `.env.example` to `.env` and fill in your keys:
 
@@ -116,45 +178,55 @@ cp .env.example .env
 | `TRONGRID_API_KEY` | No | trongrid.io (free tier works without key) |
 | `COINGECKO_API_KEY` | No | coingecko.com (higher rate limits) |
 
+### 5. AWS access (only needed for S3-backed notebooks)
+
+The analysis notebooks (03, 04, 05) can read and write to `s3://stablecoin-capstone-cmu/` for
+intermediate artifacts. If you only want to run locally, all required inputs
+(`data/processed/cleansed/*.parquet`) are available through Git LFS and no AWS access is needed.
+
 ---
 
 ## Running the Pipeline
 
-### Collect data
+### A. Upstream data collection (`src/data/`)
+
+Only needed to refresh the underlying dataset. Typical users can skip this — the modeling-ready
+parquets are already committed under `data/processed/cleansed/`.
 
 ```bash
-# All sources for one coin
-python src/data/collect_all.py usdt
-
-# All sources for all coins
+# Collect all sources for all coins
 python src/data/collect_all.py all
 
-# Individual sources
-python src/data/collect_binance.py all
-python src/data/collect_onchain.py all
-python src/data/collect_curve.py all
-python src/data/collect_xrpl.py
-python src/data/collect_dune.py --query-id <id>
-python src/data/collect_fred.py
-python src/data/collect_market.py
+# Build modeling-ready dataset (run in order)
+python src/data/merge_sources.py all    # join all sources → {coin}_5m_raw.parquet
+python src/data/clean_data.py all       # zero-fill, ffill, patch anomalies → {coin}_5m.parquet
+python src/data/label_data.py all       # add depeg labels in-place
 ```
 
-### Build modeling-ready dataset
+Individual collectors can be run separately (`collect_binance.py`, `collect_onchain.py`,
+`collect_curve.py`, `collect_xrpl.py`, `collect_dune.py`, `collect_tron.py`, `collect_solana.py`,
+`collect_fred.py`, `collect_market.py`, `collect_orderbook.py`). See `data/README.md` for details.
 
-Run in order:
+### B. Downstream analysis / modeling (`notebooks/`)
 
-```bash
-# 1. Join all sources into a wide 5m dataframe (no cleaning)
-python src/data/merge_sources.py all
+Run the notebooks in order. Inputs come from `data/processed/cleansed/{coin}_5m.parquet` (this repo
+via LFS) or from S3 if you have AWS access.
 
-# 2. Zero-fill events, forward-fill daily series, patch price anomalies
-python src/data/clean_data.py all
+1. **`notebooks/03_eda_all_coins.ipynb`** — consolidated EDA across all 7 coins: price history,
+   depeg severity distribution, cross-coin co-occurrence, crisis case studies (Terra/UST May 2022,
+   USDC March 2023, USDe August 2024, etc.), per-feature AUC ranking. Plots saved to
+   `data/processed/plots/eda/`.
 
-# 3. Add depeg labels
-python src/data/label_data.py all
-```
+2. **`notebooks/04_feature_engineering.ipynb`** — constructs rolling / lag / ratio features from
+   the cleansed per-coin parquets, pools all 7 coins, and applies feature selection. Output:
+   `data/processed/features/pooled_5m.parquet` + `selected_features.json`. Plots saved to
+   `data/processed/plots/features/`.
 
-Output: `data/processed/cleansed/{coin}_5m.parquet` — one file per coin, modeling-ready.
+3. **`notebooks/05_modeling.ipynb`** — trains dual-horizon CatBoost classifiers (30-minute and
+   1-hour prediction windows), applies isotonic calibration, fits an isolation-forest baseline,
+   optimizes per-coin thresholds, runs leave-one-entity-out (LOEO) cross-validation, and produces
+   SHAP importance and beeswarm plots. Outputs: `data/processed/models/`, `data/processed/predictions/`,
+   `data/processed/plots/modelling/`.
 
 ---
 
